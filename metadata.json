@@ -1,0 +1,7 @@
+{
+  "name": "ChatSense",
+  "description": "Expert interpersonal analyst, psychological subtext decoder, and relationship communication strategist.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
