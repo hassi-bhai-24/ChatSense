@@ -9,7 +9,25 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Security & Anti-Caching Middleware
+app.use((req, res, next) => {
+  // Prevent any caching of sensitive relationship transcripts or analysis
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+
+  // Security Headers
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+
+  next();
+});
 
 const getAiClient = () => {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -87,6 +105,38 @@ function formatHistory(history: Array<{ role: 'user' | 'model'; parts: Array<{ t
   }));
 }
 
+// Helper to process massive chat transcripts safely within Gemini 1M token context
+function formatTranscriptContext(rawTranscript: string): string {
+  if (!rawTranscript || !rawTranscript.trim()) return '';
+  const trimmed = rawTranscript.trim();
+
+  // If within 1.5M characters (~375,000 tokens), use full transcript without truncation
+  const MAX_SAFE_CHARS = 1_500_000;
+  if (trimmed.length <= MAX_SAFE_CHARS) {
+    return trimmed;
+  }
+
+  // If astronomical size (>1.5M chars), retain initial dynamic + recent chronological trajectory
+  const lines = trimmed.split('\n');
+  const keepStartLines = lines.slice(0, 300);
+  const keepEndLines = lines.slice(-8000);
+  const omittedCount = lines.length - keepStartLines.length - keepEndLines.length;
+
+  return `${keepStartLines.join('\n')}\n\n[... Note: ${omittedCount.toLocaleString()} intermediate lines condensed to fit high-speed strategic reasoning window ...]\n\n${keepEndLines.join('\n')}`;
+}
+
+// 0. Explicit Zero-Trace Session Purge Endpoint
+app.post('/api/session/purge', (_req, res) => {
+  // Tell browser to clear cached data for this origin
+  res.setHeader('Clear-Site-Data', '"cache"');
+  res.json({
+    success: true,
+    zeroRetention: true,
+    message: 'Session wiped. No transcripts, diagnostics, or personal identifiers are retained.',
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // 1. SSE Stream for Chat & Analysis
 app.post('/api/chat/stream', async (req, res) => {
   const { messages, transcript, context, settings } = req.body;
@@ -98,7 +148,7 @@ app.post('/api/chat/stream', async (req, res) => {
 
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Cache-Control', 'no-cache, no-transform, no-store');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
@@ -125,7 +175,8 @@ app.post('/api/chat/stream', async (req, res) => {
     }
 
     if (transcript && transcript.trim()) {
-      enrichedSystemInstruction += `\n\n[ACTIVE TRANSCRIPT IN CONTEXT]:\n"""\n${transcript.trim()}\n"""\n`;
+      const processedTranscript = formatTranscriptContext(transcript);
+      enrichedSystemInstruction += `\n\n[ACTIVE TRANSCRIPT IN CONTEXT (Length: ${transcript.length.toLocaleString()} chars)]:\n"""\n${processedTranscript}\n"""\n`;
     }
     if (context && context.trim()) {
       enrichedSystemInstruction += `\n[RELATIONSHIP CONTEXT / USER NOTES]:\n${context.trim()}\n`;

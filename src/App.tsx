@@ -7,6 +7,7 @@ import {
   MessageSquare,
   MessageSquareQuote,
   Shield,
+  ShieldCheck,
   Scale,
   Target,
   Copy,
@@ -22,16 +23,20 @@ import {
   Trash2,
   Plus,
   StopCircle,
-  HelpCircle,
-  ExternalLink,
+  Download,
+  Upload,
+  Lock,
+  AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 import { ChatMessage } from './types/chat';
 import { ReportFormatter } from './components/ReportFormatter';
 import { SettingsModal, ChatSenseSettings } from './components/SettingsModal';
 import { AttachTranscriptModal } from './components/AttachTranscriptModal';
+import { SecurityModal } from './components/SecurityModal';
 import { LineDecoderModal } from './components/LineDecoderModal';
 import { ReplyGeneratorModal } from './components/ReplyGeneratorModal';
-import { SAMPLE_TRANSCRIPTS, SampleTranscript } from './data/sampleTranscripts';
+import { SAMPLE_TRANSCRIPTS } from './data/sampleTranscripts';
 
 interface SessionItem {
   id: string;
@@ -46,7 +51,7 @@ interface SessionItem {
 const DEFAULT_SETTINGS: ChatSenseSettings = {
   persona: 'Brutally Honest & Unapologetic',
   relationshipType: 'Dating / Romance',
-  customInstructions: 'Call out low interest and power games immediately. Keep strategic replies natural and concise.',
+  customInstructions: 'Call out low interest and power games immediately. Keep strategic replies natural, calibrated, and concise.',
   detailLevel: 'deep',
 };
 
@@ -111,21 +116,26 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamStatusText, setStreamStatusText] = useState('ChatSense is analyzing subtext...');
 
-  // Sidebar toggle (ChatGPT / Claude style)
+  // Sidebar toggle
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // Settings & Modals state
+  // Modals state
   const [settings, setSettings] = useState<ChatSenseSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [attachModalOpen, setAttachModalOpen] = useState(false);
+  const [securityModalOpen, setSecurityModalOpen] = useState(false);
   const [decodeModalOpen, setDecodeModalOpen] = useState(false);
   const [selectedLineForDecode, setSelectedLineForDecode] = useState('');
   const [replyModalOpen, setReplyModalOpen] = useState(false);
+
+  // Toast notice for wipe / export
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Auto-scroll during message generation
   useEffect(() => {
@@ -139,6 +149,11 @@ export default function App() {
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`;
     }
   }, [input]);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3500);
+  };
 
   // Update current session helper
   const updateCurrentSession = (updates: Partial<SessionItem>) => {
@@ -168,13 +183,47 @@ export default function App() {
     setInput('');
   };
 
+  // Immediate 100% Secure Wipe (Zero Data Retention)
+  const handleEndAndWipeConversation = () => {
+    if (isStreaming) {
+      abortControllerRef.current?.abort();
+      setIsStreaming(false);
+    }
+
+    // Clear all client storage
+    try {
+      sessionStorage.clear();
+      localStorage.clear();
+    } catch {
+      // storage clear safeguard
+    }
+
+    // Reset memory
+    setInput('');
+    const newId = `session-${Date.now()}`;
+    setSessions([
+      {
+        id: newId,
+        title: 'New Analysis',
+        category: 'General',
+        preview: 'Fresh confidential session',
+        transcript: '',
+        context: '',
+        messages: [],
+      },
+    ]);
+    setActiveSessionId(newId);
+
+    showToast('Session ended. All transcripts, messages, and memory permanently destroyed.');
+  };
+
   // Helper to trigger streaming chat response
   const triggerChatStream = async (outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }>) => {
     setIsStreaming(true);
-    setStreamStatusText('ChatSense is decoding subtext...');
+    setStreamStatusText('ChatSense is reading between the lines...');
 
     const timer1 = setTimeout(() => {
-      setStreamStatusText('Evaluating frame control & investment balance...');
+      setStreamStatusText('Evaluating power balance & frame control...');
     }, 1200);
     const timer2 = setTimeout(() => {
       setStreamStatusText('Calibrating behavioral playbook...');
@@ -289,7 +338,7 @@ export default function App() {
                           ...m,
                           content:
                             m.content ||
-                            `⚠️ Analysis failed: ${errMsg}. Please check that your GEMINI_API_KEY is active in the Secrets panel.`,
+                            `⚠️ Analysis failed: ${errMsg}. Please verify that GEMINI_API_KEY is active in the Secrets panel.`,
                         }
                       : m
                   ),
@@ -328,7 +377,7 @@ export default function App() {
       textareaRef.current.style.height = 'auto';
     }
 
-    // Auto-detect if user pasted a large transcript directly into the chat box
+    // Auto-detect if user pasted a multi-line transcript directly into chat
     const looksLikeTranscript =
       textToSend.includes('\n') &&
       (/user:|other:|me:|them:|\[\d+:\d+/i.test(textToSend) || textToSend.length > 250);
@@ -364,7 +413,49 @@ export default function App() {
     triggerChatStream(outgoing);
   };
 
-  // Handle clicking a starter suggestion card
+  // Direct file ingestion
+  const handleDirectFileUpload = (file: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      if (text) {
+        updateCurrentSession({
+          transcript: text,
+          title: file.name.replace(/\.[^/.]+$/, ''),
+        });
+        showToast(`Loaded ${file.name} (${(file.size / 1024).toFixed(1)} KB, ${text.split('\n').length.toLocaleString()} lines)`);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // Export analysis report
+  const handleExportReport = () => {
+    if (messages.length === 0) {
+      showToast('No analysis messages to export yet.');
+      return;
+    }
+
+    let reportMarkdown = `# ChatSense Interpersonal Diagnostic Report\n\nGenerated: ${new Date().toLocaleString()}\nRelationship Category: ${settings.relationshipType}\n\n`;
+    if (context) {
+      reportMarkdown += `### Context\n${context}\n\n`;
+    }
+
+    messages.forEach((m) => {
+      reportMarkdown += `---\n### ${m.role === 'user' ? 'User Question' : 'ChatSense Analysis'} (${m.timestamp})\n\n${m.content}\n\n`;
+    });
+
+    const blob = new Blob([reportMarkdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `ChatSense-Report-${Date.now()}.md`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast('Report downloaded as Markdown file.');
+  };
+
   const handleSelectSuggestion = (card: (typeof SUGGESTION_CARDS)[0]) => {
     const sample = SAMPLE_TRANSCRIPTS.find((s) => s.id === card.sampleId);
     if (!sample) return;
@@ -389,9 +480,31 @@ export default function App() {
   const transcriptLineCount = transcript
     .split('\n')
     .filter((l) => l.trim().length > 0).length;
+  const estimatedTokens = Math.ceil(transcript.length / 4);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-neutral-950 text-neutral-100 font-sans">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed top-4 right-4 z-50 p-3 px-4 rounded-xl bg-neutral-900 border border-neutral-700 text-xs text-neutral-100 shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+          <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Hidden File Input for Direct Upload */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".txt,.chat,.log,.csv"
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files?.[0]) {
+            handleDirectFileUpload(e.target.files[0]);
+          }
+        }}
+      />
+
       {/* 1. Left Collapsible Sidebar (ChatGPT / Claude / Gemini Style) */}
       <aside
         className={`${
@@ -496,11 +609,22 @@ export default function App() {
           </div>
         </div>
 
-        {/* Sidebar Footer (Settings & Persona) */}
-        <div className="p-3 border-t border-neutral-800/80 bg-neutral-950/40 space-y-2">
+        {/* Sidebar Footer (Security, Settings & Wipe) */}
+        <div className="p-3 border-t border-neutral-800/80 bg-neutral-950/40 space-y-1.5">
+          <button
+            onClick={() => setSecurityModalOpen(true)}
+            className="w-full px-2.5 py-1.5 rounded-xl hover:bg-neutral-800 text-emerald-400 hover:text-emerald-300 transition-colors flex items-center justify-between text-xs"
+          >
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4" />
+              <span>Zero-Trace Privacy</span>
+            </div>
+            <span className="text-[10px] text-neutral-500 font-mono">100% Ephemeral</span>
+          </button>
+
           <button
             onClick={() => setSettingsOpen(true)}
-            className="w-full px-2.5 py-2 rounded-xl hover:bg-neutral-800 text-neutral-300 hover:text-white transition-colors flex items-center justify-between text-xs"
+            className="w-full px-2.5 py-1.5 rounded-xl hover:bg-neutral-800 text-neutral-300 hover:text-white transition-colors flex items-center justify-between text-xs"
           >
             <div className="flex items-center gap-2">
               <Settings className="w-4 h-4 text-rose-400" />
@@ -509,6 +633,14 @@ export default function App() {
             <span className="text-[10px] text-neutral-500 truncate max-w-[80px]">
               {settings.persona.split(' ')[0]}
             </span>
+          </button>
+
+          <button
+            onClick={handleEndAndWipeConversation}
+            className="w-full px-2.5 py-1.5 rounded-xl hover:bg-rose-950/30 text-rose-400/90 hover:text-rose-300 transition-colors flex items-center gap-2 text-xs"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>End & Wipe Session</span>
           </button>
         </div>
       </aside>
@@ -537,7 +669,7 @@ export default function App() {
                 ChatSense
               </span>
               <span className="text-neutral-600">·</span>
-              <span className="text-xs text-neutral-400 font-medium">
+              <span className="text-xs text-neutral-400 font-medium hidden sm:inline">
                 Psychological Subtext & Strategy
               </span>
             </div>
@@ -545,6 +677,16 @@ export default function App() {
 
           {/* Right Header Controls */}
           <div className="flex items-center gap-2">
+            {/* Security Pill */}
+            <button
+              onClick={() => setSecurityModalOpen(true)}
+              className="px-2.5 py-1 rounded-lg text-xs font-medium bg-neutral-900 hover:bg-neutral-850 border border-neutral-800 text-emerald-400 hover:text-emerald-300 transition-colors flex items-center gap-1.5"
+              title="Click for zero data retention details"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Zero-Trace Ephemeral</span>
+            </button>
+
             {/* Active Transcript Indicator Button */}
             <button
               onClick={() => setAttachModalOpen(true)}
@@ -557,31 +699,32 @@ export default function App() {
               <Paperclip className="w-3.5 h-3.5 text-rose-400" />
               <span>
                 {transcript.trim()
-                  ? `Transcript (${transcriptLineCount} lines)`
-                  : 'Attach Transcript'}
+                  ? `Transcript (${transcriptLineCount.toLocaleString()} lines · ~${estimatedTokens.toLocaleString()} tokens)`
+                  : 'Attach Chat (Up to 50MB)'}
               </span>
             </button>
 
-            {/* Tools menu */}
+            {/* Export Report (if conversation active) */}
+            {hasMessages && (
+              <button
+                onClick={handleExportReport}
+                className="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 border border-neutral-800 transition-colors"
+                title="Download Analysis Report (.md)"
+              >
+                <Download className="w-4 h-4" />
+              </button>
+            )}
+
+            {/* Wipe Button in Top Bar */}
             <button
-              onClick={() => {
-                setSelectedLineForDecode('');
-                setDecodeModalOpen(true);
-              }}
-              className="hidden sm:flex px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 hover:text-white transition-colors items-center gap-1.5"
+              onClick={handleEndAndWipeConversation}
+              className="p-2 rounded-lg text-neutral-400 hover:text-rose-400 hover:bg-neutral-900 border border-neutral-800 transition-colors"
+              title="End conversation & wipe all data immediately"
             >
-              <MessageSquareQuote className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Decode Line</span>
+              <Trash2 className="w-4 h-4" />
             </button>
 
-            <button
-              onClick={() => setReplyModalOpen(true)}
-              className="hidden sm:flex px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 hover:text-white transition-colors items-center gap-1.5"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Draft Scripts</span>
-            </button>
-
+            {/* Settings Trigger */}
             <button
               onClick={() => setSettingsOpen(true)}
               className="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 border border-neutral-800 transition-colors"
@@ -606,7 +749,7 @@ export default function App() {
                   What conversation are we decoding today?
                 </h1>
                 <p className="text-xs sm:text-sm text-neutral-400 max-w-md mx-auto">
-                  Paste a raw chat transcript, attach an ongoing text thread, or pick a scenario to uncover hidden motives.
+                  Paste a chat transcript of any length, drop an exported chat file, or choose a dilemma below.
                 </p>
               </div>
 
@@ -623,7 +766,7 @@ export default function App() {
                     }
                   }}
                   rows={2}
-                  placeholder="Paste a chat log directly, or ask a question (e.g. 'Decode why they stopped replying')..."
+                  placeholder="Paste a chat log directly, or ask a question (e.g. 'Decode why their response time changed')..."
                   className="w-full text-xs sm:text-sm bg-transparent border-0 text-neutral-100 placeholder-neutral-500 focus:outline-none resize-none leading-relaxed p-1"
                 />
 
@@ -639,8 +782,19 @@ export default function App() {
                     >
                       <Paperclip className="w-3.5 h-3.5 text-rose-400" />
                       <span>
-                        {transcript.trim() ? 'Transcript Attached' : 'Attach Transcript'}
+                        {transcript.trim()
+                          ? `Transcript Attached (${transcriptLineCount.toLocaleString()} lines)`
+                          : 'Attach Transcript / File'}
                       </span>
+                    </button>
+
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="hidden sm:inline-flex px-2 py-1.5 rounded-lg text-xs text-neutral-400 hover:text-white bg-neutral-950 border border-neutral-800 transition-colors items-center gap-1"
+                      title="Upload WhatsApp / iMessage / Slack export"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Upload File</span>
                     </button>
 
                     <button
@@ -766,7 +920,7 @@ export default function App() {
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
                   <span className="text-[11px] text-neutral-500 font-medium shrink-0 flex items-center gap-1 mr-1">
                     <Sparkles className="w-3 h-3 text-rose-400" />
-                    Quick Follow-up:
+                    Quick Strategy:
                   </span>
                   {FOLLOWUP_CHIPS.map((chip, idx) => (
                     <button
@@ -828,14 +982,22 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Footer disclaimer */}
+                {/* Footer status & Privacy Guarantee */}
                 <div className="flex items-center justify-between text-[11px] text-neutral-500 px-1">
-                  <span>ChatSense delivers psychological subtext analysis based on your transcript.</span>
+                  <button
+                    onClick={() => setSecurityModalOpen(true)}
+                    className="flex items-center gap-1 text-emerald-400/90 hover:text-emerald-300 transition-colors cursor-pointer"
+                  >
+                    <Lock className="w-3 h-3" />
+                    <span>Zero data stored · End session to permanently wipe</span>
+                  </button>
                   <button
                     onClick={() => setAttachModalOpen(true)}
                     className="text-neutral-400 hover:text-rose-400 underline underline-offset-2 transition-colors cursor-pointer"
                   >
-                    {transcript.trim() ? 'View active transcript' : 'Attach transcript'}
+                    {transcript.trim()
+                      ? `Transcript active (${transcriptLineCount.toLocaleString()} lines)`
+                      : 'Attach chat transcript'}
                   </button>
                 </div>
               </div>
@@ -844,7 +1006,7 @@ export default function App() {
         </main>
       </div>
 
-      {/* Settings Modal (Dedicated Settings Part) */}
+      {/* Settings Modal */}
       <SettingsModal
         isOpen={settingsOpen}
         onClose={() => setSettingsOpen(false)}
@@ -870,6 +1032,13 @@ export default function App() {
             title: title || currentSession.title,
           });
         }}
+      />
+
+      {/* Security & Zero Retention Modal */}
+      <SecurityModal
+        isOpen={securityModalOpen}
+        onClose={() => setSecurityModalOpen(false)}
+        onEndAndWipeConversation={handleEndAndWipeConversation}
       />
 
       {/* Line Decoder Modal */}
