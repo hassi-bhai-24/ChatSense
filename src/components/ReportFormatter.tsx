@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Copy, Check, Sparkles, MessageSquareQuote, ShieldAlert, ArrowRight } from 'lucide-react';
+import { Copy, Check, Sparkles, MessageSquareQuote } from 'lucide-react';
 
 interface ReportFormatterProps {
   content: string;
@@ -13,11 +13,29 @@ export const ReportFormatter: React.FC<ReportFormatterProps> = ({
   onInsertPrompt,
 }) => {
   const [copiedIndex, setCopiedIndex] = useState<string | null>(null);
+  const [copyFailedIndex, setCopyFailedIndex] = useState<string | null>(null);
 
-  const handleCopy = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedIndex(id);
-    setTimeout(() => setCopiedIndex(null), 2000);
+  // Copying can fail on non-secure origins or when permission is denied;
+  // never let it throw inside a click handler.
+  const copyText = async (text: string): Promise<boolean> => {
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return false;
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopy = async (text: string, id: string) => {
+    const ok = await copyText(text);
+    if (ok) {
+      setCopiedIndex(id);
+      setTimeout(() => setCopiedIndex(null), 2000);
+    } else {
+      setCopyFailedIndex(id);
+      setTimeout(() => setCopyFailedIndex(null), 3000);
+    }
   };
 
   // Parse lines to detect key sections or scripts
@@ -29,9 +47,10 @@ export const ReportFormatter: React.FC<ReportFormatterProps> = ({
       const trimmed = para.trim();
       if (!trimmed) return null;
 
-      // Header 1 or 2
-      if (trimmed.startsWith('# ') || trimmed.startsWith('## ')) {
-        const title = trimmed.replace(/^#+\s*/, '');
+      // Headers (# through ######)
+      const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/);
+      if (headingMatch) {
+        const title = headingMatch[2];
         const isEmotional = title.includes('Emotional') || title.includes('Diagnostic');
         const isPower = title.includes('Power Dynamics') || title.includes('Subtext');
         const isPlaybook = title.includes('Behavioral') || title.includes('Playbook');
@@ -54,12 +73,20 @@ export const ReportFormatter: React.FC<ReportFormatterProps> = ({
         );
       }
 
-      // Check if this paragraph contains a script / Option quote
-      const optionMatch = trimmed.match(/(Option [A-C]|🎭|🎯|🧊).*?["“]([^"”]+)["”]/i);
-      if (optionMatch && optionMatch[2]) {
-        const scriptText = optionMatch[2];
+      // Check if this paragraph contains a script / Option quote. Anchor the
+      // search to the option label line, so a quote earlier in the paragraph
+      // (e.g. in an explanation) is never mistaken for the script itself.
+      const scriptLines = trimmed.split('\n');
+      const labelIdx = scriptLines.findIndex((l) => /(Option [A-C]|🎭|🎯|🧊)/.test(l));
+      const optionMatch =
+        labelIdx >= 0
+          ? scriptLines.slice(labelIdx).join('\n').match(/["“]([^"”]+)["”]/)
+          : null;
+      if (optionMatch && optionMatch[1]) {
+        const scriptText = optionMatch[1];
         const scriptId = `script-${pIdx}`;
         const isCopied = copiedIndex === scriptId;
+        const copyFailed = copyFailedIndex === scriptId;
 
         return (
           <div
@@ -75,6 +102,11 @@ export const ReportFormatter: React.FC<ReportFormatterProps> = ({
                 <div className="text-sm font-medium text-neutral-100 bg-neutral-950/70 p-2.5 rounded-lg border border-neutral-800/80 font-sans select-all">
                   "{scriptText}"
                 </div>
+                {copyFailed && (
+                  <p className="text-xs text-amber-300 pt-1">
+                    Copy failed — select the text manually.
+                  </p>
+                )}
                 {trimmed.includes('Why it works') && (
                   <p className="text-xs text-neutral-400 leading-relaxed pt-1">
                     {trimmed.substring(trimmed.indexOf('Why it works'))}
@@ -91,6 +123,8 @@ export const ReportFormatter: React.FC<ReportFormatterProps> = ({
                     <Check className="w-3.5 h-3.5 text-emerald-400" />
                     <span className="text-emerald-400">Copied</span>
                   </>
+                ) : copyFailed ? (
+                  <span className="text-amber-300">Copy failed</span>
                 ) : (
                   <>
                     <Copy className="w-3.5 h-3.5" />
@@ -114,7 +148,7 @@ export const ReportFormatter: React.FC<ReportFormatterProps> = ({
                   {renderLineWithInlineFormatting(line)}
                   {quoteMatch && onSelectLineForDecode && (
                     <button
-                      onClick={() => onSelectLineForDecode(quoteMatch[1])}
+                      onClick={() => onSelectLineForDecode(line.trim())}
                       className="ml-2 inline-flex items-center gap-1 text-[11px] text-rose-400/80 hover:text-rose-300 underline underline-offset-2 transition-colors cursor-pointer"
                     >
                       <MessageSquareQuote className="w-3 h-3" />

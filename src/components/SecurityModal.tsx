@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   ShieldCheck,
@@ -24,32 +24,67 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
 }) => {
   const [wiping, setWiping] = useState(false);
   const [wipedSuccess, setWipedSuccess] = useState(false);
+  const [wipeError, setWipeError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Escape closes the modal, and opening it moves focus to the panel.
+  useEffect(() => {
+    if (!isOpen) return;
+    panelRef.current?.focus();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose, panelRef]);
+
+  // Reset the wipe state whenever the modal opens, so a previous result is
+  // never shown as if it belonged to this session.
+  useEffect(() => {
+    if (isOpen) {
+      setWiping(false);
+      setWipedSuccess(false);
+      setWipeError(null);
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
   const handleWipe = async () => {
     setWiping(true);
+    setWipeError(null);
+    // Wait for the purge response and report a failure honestly instead of
+    // claiming success when the request never completed.
+    let purgeFailed = false;
     try {
-      // Call server purge
-      await fetch('/api/session/purge', { method: 'POST' }).catch(() => {});
-      // Call parent wipe handler (clears state, storage, aborts streams)
-      onEndAndWipeConversation();
-      setWipedSuccess(true);
-      setTimeout(() => {
-        setWipedSuccess(false);
-        setWiping(false);
-        onClose();
-      }, 1200);
+      const res = await fetch('/api/session/purge', { method: 'POST' });
+      if (!res.ok) purgeFailed = true;
     } catch {
-      onEndAndWipeConversation();
+      purgeFailed = true;
+    }
+    // Clear this app's in-memory copy either way; the purge request only
+    // affects this origin's browser cache.
+    onEndAndWipeConversation();
+    setWipedSuccess(true);
+    // wiping must be cleared here: the button renders the "Clearing..."
+    // label whenever wiping is true, so leaving it set would hide the
+    // success label until the modal closes 1600 ms later.
+    setWiping(false);
+    if (purgeFailed) {
+      setWipeError(
+        'The browser cache-purge request failed. This app\'s in-memory copy was still cleared.',
+      );
+    }
+    setTimeout(() => {
+      setWipedSuccess(false);
       setWiping(false);
       onClose();
-    }
+    }, 1600);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
-      <div className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+      <div ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Security and privacy" className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
         {/* Header */}
         <div className="p-4 sm:px-6 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/60">
           <div className="flex items-center gap-2.5">
@@ -58,13 +93,13 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
             </div>
             <div>
               <h3 className="text-sm font-semibold text-neutral-100 flex items-center gap-2">
-                <span>Security & Zero-Trace Privacy</span>
+                <span>Security & Privacy</span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-950 border border-emerald-800/60 text-emerald-300">
-                  100% EPHEMERAL
+                  NO APP STORAGE
                 </span>
               </h3>
               <p className="text-[11px] text-neutral-400">
-                Guaranteed zero storage of your chat logs, messages, and psychological profiles
+                What ChatSense stores, what it sends for analysis, and what ending a session clears
               </p>
             </div>
           </div>
@@ -82,10 +117,10 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
             <div className="p-3 rounded-xl bg-neutral-950/60 border border-neutral-800/80 space-y-1.5">
               <div className="flex items-center gap-2 text-rose-400 font-semibold">
                 <DatabaseZap className="w-4 h-4" />
-                <span>Zero Database Storage</span>
+                <span>No App Database</span>
               </div>
               <p className="text-[11px] text-neutral-400 leading-relaxed">
-                ChatSense does not possess a database or disk store. Transcripts exist strictly in volatile RAM while being analyzed.
+                ChatSense has no database, no disk store, and saves nothing in browser storage. Sessions live only in memory and are lost when you leave or refresh.
               </p>
             </div>
 
@@ -102,10 +137,10 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
             <div className="p-3 rounded-xl bg-neutral-950/60 border border-neutral-800/80 space-y-1.5">
               <div className="flex items-center gap-2 text-emerald-400 font-semibold">
                 <EyeOff className="w-4 h-4" />
-                <span>Zero Telemetry & Tracking</span>
+                <span>Sent to Google's Gemini API</span>
               </div>
               <p className="text-[11px] text-neutral-400 leading-relaxed">
-                No third-party trackers, analytics scripts, or surveillance pixels. Your interpersonal conversations are completely confidential.
+                Transcripts are sent to Google's Gemini API for analysis. Google's retention policy applies to that copy — this app cannot delete it. No analytics scripts or tracking pixels are loaded.
               </p>
             </div>
 
@@ -126,10 +161,10 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
               <div className="space-y-0.5">
                 <div className="font-semibold text-rose-300 flex items-center gap-1.5">
                   <Trash2 className="w-4 h-4 text-rose-400" />
-                  <span>Immediate Memory Destruction</span>
+                  <span>Clear This App's Copy</span>
                 </div>
                 <p className="text-[11px] text-neutral-400 leading-relaxed">
-                  End the current conversation, abort all connections, clear browser memory, and purge all data.
+                  End the current conversation, abort all connections, and clear this app's in-memory copy. This cannot delete copies already sent to Google's Gemini API.
                 </p>
               </div>
             </div>
@@ -142,26 +177,29 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
               {wiping ? (
                 <>
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>Purging Active Memory & Caches...</span>
+                  <span>Clearing This App's Copy...</span>
                 </>
               ) : wipedSuccess ? (
                 <>
                   <CheckCircle className="w-3.5 h-3.5 text-white" />
-                  <span>Data Completely Purged</span>
+                  <span>This App's Copy Cleared</span>
                 </>
               ) : (
                 <>
                   <Trash2 className="w-3.5 h-3.5" />
-                  <span>End Conversation & Permanently Wipe All Data</span>
+                  <span>End Conversation & Clear This App's Copy</span>
                 </>
               )}
             </button>
+            {wipeError && (
+              <p className="text-[11px] text-amber-300 leading-relaxed">{wipeError}</p>
+            )}
           </div>
         </div>
 
         {/* Footer */}
         <div className="p-4 sm:px-6 border-t border-neutral-800 bg-neutral-950/60 flex items-center justify-between text-[11px] text-neutral-500">
-          <span>Compliant with W3C Clear-Site-Data standards</span>
+          <span>Clear-Site-Data only clears this origin's cache; it cannot remove data already sent to Google's Gemini API.</span>
           <button
             onClick={onClose}
             className="px-4 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-medium text-xs transition-colors"

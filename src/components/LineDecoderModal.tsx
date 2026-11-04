@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Sparkles, MessageSquareQuote, Check, Copy, AlertTriangle, ArrowRight } from 'lucide-react';
 
 interface LineDecoderModalProps {
@@ -23,16 +23,42 @@ export const LineDecoderModal: React.FC<LineDecoderModalProps> = ({
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
+  // Escape closes the modal, and opening it moves focus to the panel.
   useEffect(() => {
+    if (!isOpen) return;
+    panelRef.current?.focus();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose, panelRef]);
+
+  // Reopening (even for the same line) clears the previous result and
+  // re-decodes, so a stale result is never shown. Closing aborts any
+  // in-flight request via the effect cleanup.
+  useEffect(() => {
+    if (!isOpen) return;
+    setResult(null);
+    setError(null);
     if (selectedLine) {
       setLine(selectedLine);
       handleDecode(selectedLine);
     }
-  }, [selectedLine]);
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [isOpen, selectedLine]);
 
   const handleDecode = async (targetLine: string) => {
     if (!targetLine.trim()) return;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -46,6 +72,7 @@ export const LineDecoderModal: React.FC<LineDecoderModalProps> = ({
           transcript,
           context,
         }),
+        signal: controller.signal,
       });
 
       const data = await res.json();
@@ -54,25 +81,43 @@ export const LineDecoderModal: React.FC<LineDecoderModalProps> = ({
       }
       setResult(data.result);
     } catch (err: unknown) {
+      if ((err as Error)?.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'Error decoding line');
     } finally {
-      setLoading(false);
+      if (abortRef.current === controller) setLoading(false);
     }
   };
 
-  const handleCopy = () => {
+  // Copying can fail on non-secure origins or when permission is denied;
+  // never let it throw inside a click handler.
+  const copyText = async (text: string): Promise<boolean> => {
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return false;
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopy = async () => {
     if (result) {
-      navigator.clipboard.writeText(result);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      const ok = await copyText(result);
+      if (ok) {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        setCopyFailed(true);
+        setTimeout(() => setCopyFailed(false), 3000);
+      }
     }
   };
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
-      <div className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <div ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Psychological subtext decoder" className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
         {/* Header */}
         <div className="p-4 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/60">
           <div className="flex items-center gap-2">
@@ -150,6 +195,8 @@ export const LineDecoderModal: React.FC<LineDecoderModalProps> = ({
                       <Check className="w-3 h-3 text-emerald-400" />
                       <span className="text-emerald-400">Copied</span>
                     </>
+                  ) : copyFailed ? (
+                    <span className="text-amber-300">Copy failed — select the text manually</span>
                   ) : (
                     <>
                       <Copy className="w-3 h-3" />

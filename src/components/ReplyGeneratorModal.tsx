@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, Sparkles, Send, Copy, Check, MessageSquare } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Sparkles, Copy, Check, MessageSquare } from 'lucide-react';
 
 interface ReplyGeneratorModalProps {
   isOpen: boolean;
@@ -30,10 +30,39 @@ export const ReplyGeneratorModal: React.FC<ReplyGeneratorModalProps> = ({
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copiedScript, setCopiedScript] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Escape closes the modal, and opening it moves focus to the panel.
+  useEffect(() => {
+    if (!isOpen) return;
+    panelRef.current?.focus();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose, panelRef]);
+
+  // Reopening clears the previous result, so a stale result is never shown.
+  // Closing aborts any in-flight request via the effect cleanup.
+  useEffect(() => {
+    if (!isOpen) return;
+    setResult(null);
+    setError(null);
+    setCopiedScript(null);
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [isOpen]);
 
   const activeGoal = customGoal.trim() || goal;
 
   const handleGenerate = async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -47,6 +76,7 @@ export const ReplyGeneratorModal: React.FC<ReplyGeneratorModalProps> = ({
           context,
           goal: activeGoal,
         }),
+        signal: controller.signal,
       });
 
       const data = await res.json();
@@ -55,23 +85,41 @@ export const ReplyGeneratorModal: React.FC<ReplyGeneratorModalProps> = ({
       }
       setResult(data.result);
     } catch (err: unknown) {
+      if ((err as Error)?.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'Error drafting replies');
     } finally {
-      setLoading(false);
+      if (abortRef.current === controller) setLoading(false);
     }
   };
 
-  const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedScript(text);
-    setTimeout(() => setCopiedScript(null), 2000);
+  // Copying can fail on non-secure origins or when permission is denied;
+  // never let it throw inside a click handler.
+  const copyText = async (text: string): Promise<boolean> => {
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return false;
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) {
+      setCopiedScript(text);
+      setTimeout(() => setCopiedScript(null), 2000);
+    } else {
+      setCopyFailed(true);
+      setTimeout(() => setCopyFailed(false), 3000);
+    }
   };
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
-      <div className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <div ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Response strategist and script generator" className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
         {/* Header */}
         <div className="p-4 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/60">
           <div className="flex items-center gap-2">
@@ -124,7 +172,7 @@ export const ReplyGeneratorModal: React.FC<ReplyGeneratorModalProps> = ({
 
           <button
             onClick={handleGenerate}
-            disabled={loading}
+            disabled={loading || !transcript.trim()}
             className="w-full py-2.5 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white shadow-lg shadow-rose-950/30 transition-all flex items-center justify-center gap-2"
           >
             {loading ? (
@@ -146,6 +194,12 @@ export const ReplyGeneratorModal: React.FC<ReplyGeneratorModalProps> = ({
             </div>
           )}
 
+          {!transcript.trim() && !loading && (
+            <div className="p-3 rounded-xl bg-neutral-950/60 border border-neutral-800 text-xs text-neutral-400">
+              Attach a transcript first to generate scripts grounded in your conversation.
+            </div>
+          )}
+
           {result && !loading && (
             <div className="space-y-3 pt-2">
               <div className="flex items-center justify-between text-xs text-neutral-400">
@@ -159,6 +213,8 @@ export const ReplyGeneratorModal: React.FC<ReplyGeneratorModalProps> = ({
                       <Check className="w-3 h-3 text-emerald-400" />
                       <span className="text-emerald-400">Copied All</span>
                     </>
+                  ) : copyFailed ? (
+                    <span className="text-amber-300">Copy failed — select the text manually</span>
                   ) : (
                     <>
                       <Copy className="w-3 h-3" />
