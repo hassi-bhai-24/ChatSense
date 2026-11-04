@@ -1,23 +1,14 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   Send,
   Sparkles,
-  FileText,
-  RotateCcw,
   MessageSquare,
   MessageSquareQuote,
-  Shield,
   ShieldCheck,
-  Scale,
-  Target,
-  Copy,
-  Check,
-  ChevronDown,
   ArrowRight,
   BookOpen,
   PanelLeftClose,
   PanelLeft,
-  SlidersHorizontal,
   Settings,
   Paperclip,
   Trash2,
@@ -26,8 +17,6 @@ import {
   Download,
   Upload,
   Lock,
-  AlertTriangle,
-  RefreshCw,
 } from 'lucide-react';
 import { ChatMessage } from './types/chat';
 import { ReportFormatter } from './components/ReportFormatter';
@@ -130,12 +119,27 @@ export default function App() {
 
   // Toast notice for wipe / export
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear a pending toast timer when the app unmounts.
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Latest sessions, for handlers (e.g. delete) that must not read a stale
+  // closure when several updates happen in quick succession.
+  const sessionsRef = useRef(sessions);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
 
   // Auto-scroll during message generation
   useEffect(() => {
@@ -152,7 +156,8 @@ export default function App() {
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 3500);
   };
 
   // Update current session helper
@@ -182,6 +187,18 @@ export default function App() {
     setActiveSessionId(newId);
     setInput('');
   };
+
+  // ⌘N / Ctrl+N starts a new analysis, as labelled on the sidebar button.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        handleNewChat();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [isStreaming]);
 
   // Immediate 100% Secure Wipe (Zero Data Retention)
   const handleEndAndWipeConversation = () => {
@@ -214,11 +231,17 @@ export default function App() {
     ]);
     setActiveSessionId(newId);
 
-    showToast('Session ended. All transcripts, messages, and memory permanently destroyed.');
+    showToast('Session ended. This app\'s copy was cleared. Transcripts already sent to Google\'s Gemini API remain subject to Google\'s retention.');
   };
 
-  // Helper to trigger streaming chat response
-  const triggerChatStream = async (outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }>) => {
+  // Helper to trigger streaming chat response.
+  // transcript/context/baseMessages are passed explicitly by the caller: reading
+  // them from the render closure here would use stale values when the caller has
+  // just updated the session (e.g. a suggestion card that swaps the transcript).
+  const triggerChatStream = async (
+    outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }>,
+    streamOptions: { transcript: string; context: string; baseMessages: ChatMessage[] },
+  ) => {
     setIsStreaming(true);
     setStreamStatusText('ChatSense is reading between the lines...');
 
@@ -239,10 +262,9 @@ export default function App() {
       content: '',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       isStreaming: true,
-      isInitialDiagnostic: outgoingMessages.length === 1,
     };
 
-    const sessionMessagesWithAssistant = [...(currentSession?.messages || []), newAssistantMsg];
+    const sessionMessagesWithAssistant = [...streamOptions.baseMessages, newAssistantMsg];
     updateCurrentSession({ messages: sessionMessagesWithAssistant });
 
     try {
@@ -251,15 +273,27 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: outgoingMessages,
-          transcript,
-          context,
+          transcript: streamOptions.transcript,
+          context: streamOptions.context,
           settings,
         }),
         signal: controller.signal,
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        // Surface the server's mapped error message (e.g. missing key,
+        // quota) instead of a bare HTTP status, so the user sees the same
+        // plain message the other endpoints return.
+        let serverMessage = `HTTP error! status: ${response.status}`;
+        try {
+          const data = await response.json();
+          if (data && typeof data.error === 'string' && data.error) {
+            serverMessage = data.error;
+          }
+        } catch {
+          // Keep the status fallback when the body is not JSON.
+        }
+        throw new Error(serverMessage);
       }
 
       const reader = response.body?.getReader();
@@ -268,8 +302,9 @@ export default function App() {
       const decoder = new TextDecoder('utf-8');
       let accumulatedText = '';
       let buffer = '';
+      let streamDone = false;
 
-      while (true) {
+      while (!streamDone) {
         const { value, done } = await reader.read();
         if (done) break;
 
@@ -282,7 +317,10 @@ export default function App() {
           if (!trimmed.startsWith('data:')) continue;
           const dataStr = trimmed.slice(5).trim();
 
-          if (dataStr === '[DONE]') break;
+          if (dataStr === '[DONE]') {
+            streamDone = true;
+            break;
+          }
 
           try {
             const parsed = JSON.parse(dataStr);
@@ -338,7 +376,7 @@ export default function App() {
                           ...m,
                           content:
                             m.content ||
-                            `⚠️ Analysis failed: ${errMsg}. Please verify that GEMINI_API_KEY is active in the Secrets panel.`,
+                            `⚠️ Analysis failed: ${errMsg}`,
                         }
                       : m
                   ),
@@ -367,8 +405,13 @@ export default function App() {
     }
   };
 
-  // Send message
-  const handleSendMessage = (overrideText?: string) => {
+  // Send message. Callers that have just changed the session (suggestion cards,
+  // pasted transcripts) must pass the new transcript/context explicitly, because
+  // the state update has not applied yet when this runs.
+  const handleSendMessage = (
+    overrideText?: string,
+    sessionOverrides?: { transcript?: string; context?: string },
+  ) => {
     const textToSend = (overrideText ?? input).trim();
     if (!textToSend || isStreaming) return;
 
@@ -382,11 +425,17 @@ export default function App() {
       textToSend.includes('\n') &&
       (/user:|other:|me:|them:|\[\d+:\d+/i.test(textToSend) || textToSend.length > 250);
 
+    let effectiveTranscript = sessionOverrides?.transcript ?? transcript;
+    const effectiveContext = sessionOverrides?.context ?? context;
+
     if (looksLikeTranscript && !transcript.trim()) {
       updateCurrentSession({
         transcript: textToSend,
         title: textToSend.slice(0, 32).trim() + '...',
       });
+      // The pasted text is the transcript for this very request, even though
+      // the state update above has not applied yet.
+      effectiveTranscript = textToSend;
     }
 
     const newUserMsg: ChatMessage = {
@@ -410,24 +459,58 @@ export default function App() {
       content: m.content,
     }));
 
-    triggerChatStream(outgoing);
+    triggerChatStream(outgoing, {
+      transcript: effectiveTranscript,
+      context: effectiveContext,
+      baseMessages: updatedMessages,
+    });
   };
 
-  // Direct file ingestion
+  // Transcript uploads are capped at 2 MB: the server accepts 2 MB bodies
+  // and truncates transcripts at 1.5M characters, so a larger file could
+  // never be analysed in full.
+  const readTranscriptFile = (
+    file: File,
+    onLoad: (text: string) => void,
+    onError: (message: string) => void,
+  ) => {
+    if (file.size > 2 * 1024 * 1024) {
+      onError(
+        `File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Files up to 2 MB are supported.`,
+      );
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => {
+      onError('Could not read that file. Please try a different file.');
+    };
+    reader.onload = (e) => {
+      const text = e.target?.result;
+      if (typeof text !== 'string' || !text) {
+        onError('That file did not contain readable text.');
+        return;
+      }
+      onLoad(text);
+    };
+    reader.readAsText(file);
+  };
+
+  // Direct file ingestion (size limit enforced, read errors reported)
   const handleDirectFileUpload = (file: File) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      if (text) {
+    readTranscriptFile(
+      file,
+      (text) => {
         updateCurrentSession({
           transcript: text,
           title: file.name.replace(/\.[^/.]+$/, ''),
         });
         showToast(`Loaded ${file.name} (${(file.size / 1024).toFixed(1)} KB, ${text.split('\n').length.toLocaleString()} lines)`);
-      }
-    };
-    reader.readAsText(file);
+      },
+      (message) => {
+        showToast(message);
+      },
+    );
   };
 
   // Export analysis report
@@ -440,6 +523,11 @@ export default function App() {
     let reportMarkdown = `# ChatSense Interpersonal Diagnostic Report\n\nGenerated: ${new Date().toLocaleString()}\nRelationship Category: ${settings.relationshipType}\n\n`;
     if (context) {
       reportMarkdown += `### Context\n${context}\n\n`;
+    }
+    if (transcript.trim()) {
+      reportMarkdown += `### Source Transcript\n${transcript}\n\n`;
+    } else {
+      reportMarkdown += `### Source Transcript\nNo transcript was attached; this export contains analysis only.\n\n`;
     }
 
     messages.forEach((m) => {
@@ -466,7 +554,12 @@ export default function App() {
       title: sample.title,
     });
 
-    handleSendMessage(card.prompt);
+    // Pass the sample's transcript explicitly: the state update above has not
+    // applied yet, so the stream must not read the previous transcript.
+    handleSendMessage(card.prompt, {
+      transcript: sample.transcript,
+      context: sample.context,
+    });
   };
 
   const handleStopGeneration = () => {
@@ -486,7 +579,7 @@ export default function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-neutral-950 text-neutral-100 font-sans">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed top-4 right-4 z-50 p-3 px-4 rounded-xl bg-neutral-900 border border-neutral-700 text-xs text-neutral-100 shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+        <div className="fixed top-4 right-4 z-50 p-3 px-4 rounded-xl bg-neutral-900 border border-neutral-700 text-xs text-neutral-100 shadow-2xl flex items-center gap-2">
           <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{toastMessage}</span>
         </div>
@@ -502,6 +595,8 @@ export default function App() {
           if (e.target.files?.[0]) {
             handleDirectFileUpload(e.target.files[0]);
           }
+          // Reset so the same file can be selected again.
+          e.target.value = '';
         }}
       />
 
@@ -542,25 +637,28 @@ export default function App() {
             {sessions.map((s) => (
               <div
                 key={s.id}
-                onClick={() => setActiveSessionId(s.id)}
-                className={`group flex items-center justify-between p-2 rounded-xl cursor-pointer transition-colors ${
+                className={`group flex items-center justify-between rounded-xl transition-colors ${
                   s.id === activeSessionId
                     ? 'bg-neutral-800 text-white font-medium'
                     : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200'
                 }`}
               >
-                <div className="flex items-center gap-2 truncate flex-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveSessionId(s.id)}
+                  aria-current={s.id === activeSessionId}
+                  className="flex items-center gap-2 truncate flex-1 p-2 rounded-xl text-left cursor-pointer"
+                >
                   <MessageSquare className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
                   <span className="truncate">{s.title || 'Untitled Chat'}</span>
-                </div>
+                </button>
                 {sessions.length > 1 && (
                   <button
-                    onClick={(e) => {
-                      e.stopPropagation();
+                    onClick={() => {
                       setSessions((prev) => prev.filter((item) => item.id !== s.id));
-                      if (activeSessionId === s.id) {
-                        const remaining = sessions.filter((item) => item.id !== s.id);
-                        if (remaining[0]) setActiveSessionId(remaining[0].id);
+                      const remaining = sessionsRef.current.filter((item) => item.id !== s.id);
+                      if (activeSessionId === s.id && remaining[0]) {
+                        setActiveSessionId(remaining[0].id);
                       }
                     }}
                     className="opacity-0 group-hover:opacity-100 p-1 text-neutral-500 hover:text-rose-400 rounded transition-opacity"
@@ -617,9 +715,9 @@ export default function App() {
           >
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4" />
-              <span>Zero-Trace Privacy</span>
+              <span>Privacy & Data</span>
             </div>
-            <span className="text-[10px] text-neutral-500 font-mono">100% Ephemeral</span>
+            <span className="text-[10px] text-neutral-500 font-mono">No app storage</span>
           </button>
 
           <button
@@ -680,11 +778,11 @@ export default function App() {
             {/* Security Pill */}
             <button
               onClick={() => setSecurityModalOpen(true)}
-              className="px-2.5 py-1 rounded-lg text-xs font-medium bg-neutral-900 hover:bg-neutral-850 border border-neutral-800 text-emerald-400 hover:text-emerald-300 transition-colors flex items-center gap-1.5"
-              title="Click for zero data retention details"
+              className="px-2.5 py-1 rounded-lg text-xs font-medium bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-emerald-400 hover:text-emerald-300 transition-colors flex items-center gap-1.5"
+              title="Click for privacy details"
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">Zero-Trace Ephemeral</span>
+              <span className="hidden md:inline">No App Storage</span>
             </button>
 
             {/* Active Transcript Indicator Button */}
@@ -700,8 +798,17 @@ export default function App() {
               <span>
                 {transcript.trim()
                   ? `Transcript (${transcriptLineCount.toLocaleString()} lines · ~${estimatedTokens.toLocaleString()} tokens)`
-                  : 'Attach Chat (Up to 50MB)'}
+                  : 'Attach Chat (Up to 2 MB)'}
               </span>
+            </button>
+
+            {/* Draft Replies (Reply Generator) */}
+            <button
+              onClick={() => setReplyModalOpen(true)}
+              className="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-900 border border-neutral-800 transition-colors"
+              title="Draft reply scripts"
+            >
+              <MessageSquareQuote className="w-4 h-4" />
             </button>
 
             {/* Export Report (if conversation active) */}
@@ -803,6 +910,15 @@ export default function App() {
                     >
                       <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
                       <span>{settings.persona}</span>
+                    </button>
+
+                    <button
+                      onClick={() => setReplyModalOpen(true)}
+                      disabled={isStreaming}
+                      className="hidden sm:inline-flex px-2.5 py-1.5 rounded-lg text-xs font-medium text-rose-300 hover:text-rose-200 bg-rose-950/40 border border-rose-800/60 transition-colors items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <MessageSquareQuote className="w-3.5 h-3.5" />
+                      <span>Draft replies</span>
                     </button>
                   </div>
 
@@ -932,6 +1048,14 @@ export default function App() {
                       {chip}
                     </button>
                   ))}
+                  <button
+                    onClick={() => setReplyModalOpen(true)}
+                    disabled={isStreaming}
+                    className="whitespace-nowrap shrink-0 px-2.5 py-1 rounded-lg bg-rose-950/40 hover:bg-rose-900/40 border border-rose-800/60 text-rose-300 hover:text-rose-200 transition-colors cursor-pointer text-xs disabled:opacity-50 flex items-center gap-1"
+                  >
+                    <MessageSquareQuote className="w-3 h-3" />
+                    Draft replies
+                  </button>
                 </div>
 
                 {/* Main Input Box */}
@@ -989,7 +1113,7 @@ export default function App() {
                     className="flex items-center gap-1 text-emerald-400/90 hover:text-emerald-300 transition-colors cursor-pointer"
                   >
                     <Lock className="w-3 h-3" />
-                    <span>Zero data stored · End session to permanently wipe</span>
+                    <span>Nothing stored by this app · End session to clear this app's copy</span>
                   </button>
                   <button
                     onClick={() => setAttachModalOpen(true)}

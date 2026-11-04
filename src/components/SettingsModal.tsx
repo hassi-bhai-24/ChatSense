@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Settings,
@@ -6,10 +6,7 @@ import {
   Shield,
   FileText,
   User,
-  Sparkles,
   Check,
-  RotateCcw,
-  BookOpen,
 } from 'lucide-react';
 
 export interface ChatSenseSettings {
@@ -75,12 +72,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [localTranscript, setLocalTranscript] = useState(transcript);
   const [localContext, setLocalContext] = useState(context);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Escape closes the modal, and opening it moves focus to the panel.
+  useEffect(() => {
+    if (!isOpen) return;
+    panelRef.current?.focus();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose, panelRef]);
+
+  // Sync the editable copies whenever the modal opens. Without this, reopening
+  // the modal after the transcript changed elsewhere shows (and on save,
+  // overwrites with) stale values captured on first mount.
+  useEffect(() => {
+    if (isOpen) {
+      setLocalSettings(settings);
+      setLocalTranscript(transcript);
+      setLocalContext(context);
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
   const handleSave = () => {
     onSaveSettings(localSettings);
-    onUpdateTranscript(localTranscript, localContext);
+    // Only write the transcript back when the transcript tab was actually
+    // edited; otherwise a settings-only save must not touch it.
+    if (localTranscript !== transcript || localContext !== context) {
+      onUpdateTranscript(localTranscript, localContext);
+    }
     setSavedSuccess(true);
     setTimeout(() => {
       setSavedSuccess(false);
@@ -89,8 +113,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
-      <div className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <div ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="ChatSense settings" className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
         {/* Modal Header */}
         <div className="p-4 sm:px-6 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/60">
           <div className="flex items-center gap-2.5">
@@ -316,7 +340,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <span>Privacy Notice</span>
                 </div>
                 <p className="text-[11px] text-neutral-400 leading-relaxed">
-                  All analysis is performed directly through secure AI Studio API calls. Your transcripts and notes remain strictly within your active browser session.
+                  Nothing is stored in this app's database or browser storage. Transcripts are sent to Google's Gemini API for analysis and are subject to Google's retention. Ending the session clears this app's in-memory copy only.
                 </p>
               </div>
             </div>

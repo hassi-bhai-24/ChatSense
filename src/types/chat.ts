@@ -6,7 +6,6 @@ export interface ChatMessage {
   content: string;
   timestamp: string;
   isStreaming?: boolean;
-  isInitialDiagnostic?: boolean;
 }
 
 export interface ActiveTranscript {

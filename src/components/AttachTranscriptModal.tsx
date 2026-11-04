@@ -1,12 +1,10 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
   FileText,
   Check,
-  Sparkles,
   BookOpen,
   Upload,
-  AlertCircle,
   ShieldCheck,
   Trash2,
   Filter,
@@ -21,6 +19,39 @@ interface AttachTranscriptModalProps {
   onSave: (transcript: string, context: string, title?: string) => void;
 }
 
+// Phrases that mark a line as a chat-export system notice. Matching is
+// anchored: the line's message content (after stripping an export timestamp
+// and speaker label) must EQUAL the phrase, so a genuine message that merely
+// quotes a phrase is never removed.
+const SYSTEM_NOTICE_PHRASES = [
+  '<media omitted>',
+  'image omitted',
+  'audio omitted',
+  'video omitted',
+  'sticker omitted',
+  'gif omitted',
+  'document omitted',
+  'missed voice call',
+  'missed video call',
+  "joined using this group's invite link",
+  'you deleted this message',
+  'this message was deleted',
+  'message deleted',
+];
+
+function isSystemNoticeLine(line: string): boolean {
+  let content = line.trim().toLowerCase();
+  // Strip an export timestamp prefix: "[10:15 AM] " or "12/01/2026, 10:15 - ".
+  content = content.replace(/^\[[^\]]*\]\s*/, '');
+  content = content.replace(/^\d{1,2}\/\d{1,2}\/\d{2,4},\s*\d{1,2}:\d{2}\s*(?:am|pm)?\s*-\s*/, '');
+  // Strip a speaker label ("Name: ") so only the message content is matched.
+  content = content.replace(/^[^:\n]{1,40}:\s*/, '');
+  content = content.replace(/[.。]+$/, '');
+  if (!content) return false;
+  if (content.startsWith('messages and calls are end-to-end encrypted')) return true;
+  return SYSTEM_NOTICE_PHRASES.includes(content);
+}
+
 export const AttachTranscriptModal: React.FC<AttachTranscriptModalProps> = ({
   isOpen,
   onClose,
@@ -32,7 +63,35 @@ export const AttachTranscriptModal: React.FC<AttachTranscriptModalProps> = ({
   const [context, setContext] = useState(currentContext);
   const [isDragging, setIsDragging] = useState(false);
   const [cleanFeedback, setCleanFeedback] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [pendingRemovals, setPendingRemovals] = useState<string[] | null>(null);
+  const [preCleanTranscript, setPreCleanTranscript] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Escape closes the modal, and opening it moves focus to the panel.
+  useEffect(() => {
+    if (!isOpen) return;
+    panelRef.current?.focus();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose, panelRef]);
+
+  // Sync the editable copies whenever the modal opens, so reopening after the
+  // transcript changed elsewhere never shows (or saves) stale values.
+  useEffect(() => {
+    if (isOpen) {
+      setTranscript(currentTranscript);
+      setContext(currentContext);
+      setCleanFeedback(null);
+      setFileError(null);
+      setPendingRemovals(null);
+      setPreCleanTranscript(null);
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -54,44 +113,84 @@ export const AttachTranscriptModal: React.FC<AttachTranscriptModalProps> = ({
     onClose();
   };
 
-  const handleFileUpload = (file: File) => {
-    if (!file) return;
+  // Transcript uploads are capped at 2 MB: the server accepts 2 MB bodies
+  // and truncates transcripts at 1.5M characters, so a larger file could
+  // never be analysed in full.
+  const readTranscriptFile = (
+    file: File,
+    onLoad: (text: string) => void,
+    onError: (message: string) => void,
+  ) => {
+    if (file.size > 2 * 1024 * 1024) {
+      onError(
+        `File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Files up to 2 MB are supported.`,
+      );
+      return;
+    }
     const reader = new FileReader();
+    reader.onerror = () => {
+      onError('Could not read that file. Please try a different file.');
+    };
     reader.onload = (e) => {
-      const text = e.target?.result as string;
-      if (text) {
-        setTranscript(text);
-        setCleanFeedback(`Loaded ${file.name} (${(file.size / 1024).toFixed(1)} KB, ${text.split('\n').length.toLocaleString()} lines)`);
-        setTimeout(() => setCleanFeedback(null), 4000);
+      const text = e.target?.result;
+      if (typeof text !== 'string' || !text) {
+        onError('That file did not contain readable text.');
+        return;
       }
+      onLoad(text);
     };
     reader.readAsText(file);
   };
 
-  // Optional tool to filter out WhatsApp/iMessage system clutter
-  const handleCleanSystemLines = () => {
-    const rawLines = transcript.split('\n');
-    const cleaned = rawLines.filter((line) => {
-      const lower = line.toLowerCase();
-      if (lower.includes('messages and calls are end-to-end encrypted')) return false;
-      if (lower.includes('<media omitted>')) return false;
-      if (lower.includes('image omitted')) return false;
-      if (lower.includes('audio omitted')) return false;
-      if (lower.includes('sticker omitted')) return false;
-      if (lower.includes('missed voice call') || lower.includes('missed video call')) return false;
-      if (lower.includes('joined using this group\'s invite link')) return false;
-      return true;
-    });
+  const handleFileUpload = (file: File) => {
+    if (!file) return;
+    readTranscriptFile(
+      file,
+      (text) => {
+        setFileError(null);
+        setTranscript(text);
+        setCleanFeedback(`Loaded ${file.name} (${(file.size / 1024).toFixed(1)} KB, ${text.split('\n').length.toLocaleString()} lines)`);
+        setTimeout(() => setCleanFeedback(null), 4000);
+      },
+      (message) => {
+        setFileError(message);
+      },
+    );
+  };
 
-    const removedCount = rawLines.length - cleaned.length;
-    setTranscript(cleaned.join('\n'));
-    setCleanFeedback(`Filtered out ${removedCount} media/system notice lines`);
+  // Filter out WhatsApp/iMessage system clutter. Shows the exact lines that
+  // would be removed first; nothing is deleted until confirmed, and the
+  // pre-clean text can be restored with Undo until the modal is applied.
+  const handlePreviewClean = () => {
+    const removed = transcript.split('\n').filter(isSystemNoticeLine);
+    if (removed.length === 0) {
+      setCleanFeedback('No system notice lines found.');
+      setTimeout(() => setCleanFeedback(null), 3000);
+      return;
+    }
+    setPendingRemovals(removed);
+  };
+
+  const handleConfirmClean = () => {
+    const count = pendingRemovals?.length ?? 0;
+    setPreCleanTranscript(transcript);
+    setTranscript(transcript.split('\n').filter((line) => !isSystemNoticeLine(line)).join('\n'));
+    setPendingRemovals(null);
+    setCleanFeedback(`Removed ${count} system notice line(s). Undo is available until you apply.`);
+    setTimeout(() => setCleanFeedback(null), 4000);
+  };
+
+  const handleUndoClean = () => {
+    if (preCleanTranscript === null) return;
+    setTranscript(preCleanTranscript);
+    setPreCleanTranscript(null);
+    setCleanFeedback('Restored the text from before cleaning.');
     setTimeout(() => setCleanFeedback(null), 3000);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in">
-      <div className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+      <div ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Attach transcript" className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="p-4 sm:px-6 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/60">
           <div className="flex items-center gap-2">
@@ -162,6 +261,8 @@ export const AttachTranscriptModal: React.FC<AttachTranscriptModalProps> = ({
                 if (e.target.files?.[0]) {
                   handleFileUpload(e.target.files[0]);
                 }
+                // Reset so the same file can be selected again.
+                e.target.value = '';
               }}
             />
             <div className="flex flex-col items-center justify-center space-y-1">
@@ -170,16 +271,54 @@ export const AttachTranscriptModal: React.FC<AttachTranscriptModalProps> = ({
                 Click or drag & drop exported chat file (.txt, .chat, .log)
               </div>
               <p className="text-[11px] text-neutral-500">
-                Supports WhatsApp exports, iMessage logs, Slack DMs, Telegram, or Instagram history. Up to 50MB supported.
+                Supports WhatsApp exports, iMessage logs, Slack DMs, Telegram, or Instagram history. Up to 2 MB supported.
               </p>
             </div>
           </div>
+
+          {/* File error feedback */}
+          {fileError && (
+            <div className="p-2.5 rounded-lg bg-rose-950/40 border border-rose-800/50 text-rose-300 text-xs flex items-center gap-2">
+              <span>{fileError}</span>
+            </div>
+          )}
 
           {/* Clean notices or file feedback */}
           {cleanFeedback && (
             <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/50 text-emerald-300 text-xs flex items-center justify-between">
               <span>{cleanFeedback}</span>
               <Check className="w-3.5 h-3.5" />
+            </div>
+          )}
+
+          {/* Preview of lines the clean filter would remove */}
+          {pendingRemovals && (
+            <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-800/50 space-y-2">
+              <div className="text-[12px] font-semibold text-amber-200">
+                Remove {pendingRemovals.length} system notice line(s)?
+              </div>
+              <div className="max-h-32 overflow-y-auto font-mono text-[11px] text-neutral-300 space-y-0.5">
+                {pendingRemovals.slice(0, 10).map((l, i) => (
+                  <div key={i} className="truncate">{l}</div>
+                ))}
+                {pendingRemovals.length > 10 && (
+                  <div>...and {pendingRemovals.length - 10} more</div>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleConfirmClean}
+                  className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-[11px] font-medium hover:bg-amber-500"
+                >
+                  Remove lines
+                </button>
+                <button
+                  onClick={() => setPendingRemovals(null)}
+                  className="px-3 py-1.5 rounded-lg bg-neutral-800 text-neutral-300 text-[11px] hover:bg-neutral-700"
+                >
+                  Keep all
+                </button>
+              </div>
             </div>
           )}
 
@@ -198,12 +337,18 @@ export const AttachTranscriptModal: React.FC<AttachTranscriptModalProps> = ({
               <span className="text-neutral-200 font-semibold">~{estimatedTokens.toLocaleString()}</span>
             </div>
             <div>
-              <span className="text-neutral-500 block text-[10px]">Gemini 1M Capacity</span>
+              <span className="text-neutral-500 block text-[10px]">Capacity (transcript only)</span>
               <span className="text-emerald-400 font-semibold">
-                {Math.max(1, Math.min(100, Math.round((estimatedTokens / 1_000_000) * 100)))}% used
+                {estimatedTokens === 0
+                  ? 0
+                  : Math.min(100, Math.round((estimatedTokens / 1_000_000) * 100))}% used
               </span>
             </div>
           </div>
+
+          <p className="text-[11px] text-neutral-500">
+            Estimate covers the transcript alone; the analysis prompt and conversation history use additional context.
+          </p>
 
           {/* Textarea */}
           <div>
@@ -214,11 +359,19 @@ export const AttachTranscriptModal: React.FC<AttachTranscriptModalProps> = ({
               <div className="flex items-center gap-2">
                 {linesCount > 10 && (
                   <button
-                    onClick={handleCleanSystemLines}
+                    onClick={handlePreviewClean}
                     className="text-[11px] text-rose-400 hover:text-rose-300 flex items-center gap-1 transition-colors"
                   >
                     <Filter className="w-3 h-3" />
                     <span>Strip media/system notices</span>
+                  </button>
+                )}
+                {preCleanTranscript !== null && (
+                  <button
+                    onClick={handleUndoClean}
+                    className="text-[11px] text-amber-300 hover:text-amber-200 flex items-center gap-1 transition-colors"
+                  >
+                    <span>Undo clean</span>
                   </button>
                 )}
                 {transcript && (
@@ -260,7 +413,7 @@ export const AttachTranscriptModal: React.FC<AttachTranscriptModalProps> = ({
           <div className="p-3 rounded-xl bg-neutral-950/40 border border-neutral-800/60 flex items-start gap-2 text-[11px] text-neutral-400">
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
             <span>
-              <strong>Zero Server Storage:</strong> Your transcript is processed strictly in-memory during this active browser session. When you end the conversation, all data is permanently destroyed.
+              <strong>How your transcript is handled:</strong> Nothing is stored in this app's database or browser storage. When you analyse it, the transcript is sent to Google's Gemini API and is subject to Google's retention. Ending the session clears this app's in-memory copy only.
             </span>
           </div>
         </div>
